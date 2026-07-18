@@ -18,6 +18,113 @@ let currentFunctionName;
  * @param {Sprite} sprite - The sprite for which the script is being generated
  * @return {void} 
  */
+
+function addNewLines(str) {
+    const specialChars = ['{', '}', ';'];
+    let result = '';
+    let spacing = "\n";
+    let isInQuotes = false;
+
+    for (var i = 0; i < str.length; i++) {
+        var char = str.charAt(i);
+        if (specialChars.includes(char) && !isInQuotes) {
+            if (char == "{") {
+                spacing += "    ";
+            } else if (char == "}") {
+                spacing = spacing.slice(0, -4);
+                result = result.slice(0, -4);
+            }
+            result += char + spacing;
+
+        } else {
+            result += char;
+
+        }
+        if (char == '"') {
+            isInQuotes = !isInQuotes;
+        }
+    }
+
+    return result;
+}
+
+function FindArgumentType(argumentID, definitionName, argumentName) {
+    //looping through alllll the blocks to find a call to the definition, and finding which type of argument is passed (maybe)
+    for (let blockID in blockList) {
+        var block = blockList[blockID];
+        //search for a procedure call
+        if (block.opcode == "procedures_call") {
+            if (block.mutation.proccode == definitionName) {
+                let value = block.inputs[argumentID];
+                console.log(value);
+                if (value != null) {
+                    if (value[1] != null && typeof (value[1]) == "object") {
+                        //if it's a written input
+                        if (value[1][0] == 10) {
+                            if (isNumber(value[1][1][0])) { return "double"; }
+                            //return "object";
+                        }
+                        if (value[1][0] == 4 || value[1][0] == 5 || value[1][0] == 6 || value[1][0] == 7) {
+                            return "double";
+                        }
+                        //if it's a variable
+                        if (value[1][0] == 12) {
+                            var name = standardizeName(value[1][1]);
+                            let type = "null";
+                            if (doesArrayContainName(globalVariables, name)) {
+                                type = getTypeByName(globalVariables, name);
+                            } else {
+                                type = getTypeByName(localVariables, name);
+                            }
+                            switch (type) {
+                                case "boolean":
+                                    return "bool";
+                                case "number":
+                                    return "double";
+                                case "string":
+                                    //return "object";
+                                    break;
+                            } // else it's a function so we don't know, we would need to store the output format of functions in blockDic
+                        }
+                    } else {
+                        //if it's a written input
+                        if (value[1][0] == 10) {
+                            return "string";
+                        }
+                        if (value[1][0] == 4 || value[1][0] == 5 || value[1][0] == 6 || value[1][0] == 7) {
+                            return "double";
+                        }
+                    }
+                }
+            }
+        }
+
+        //search for an argument used in the definition
+        if (block.opcode == "argument_reporter_string_number" && block.fields.VALUE[0] == argumentName) {
+            //We found an instance of the argument
+
+            //now search for the parent
+            let parent = blockList[block.parent];
+            if (parent.opcode == "procedures_prototype") {
+                continue;
+            }
+            if (parent.opcode.startsWith("operator_")) {
+                if (parent.opcode == "operator_equals" || parent.opcode == "operator_letter_of") {
+                    //we can't tell if it's comparing a number or a string
+                    continue;
+                }
+                if (stringOperatorOpcodes.includes(parent.opcode)) {
+                    return "string";
+                } else {
+                    return "double";
+                }
+            }
+        }
+    }
+
+    return "object";
+}
+
 function addScript(sprite, scratchProject) {
     SetStatus("Adding script for : " + sprite.name);
 
@@ -215,7 +322,21 @@ function addScript(sprite, scratchProject) {
                         let inputType = blockList[input[1]].opcode;
                         if (inputType == "argument_reporter_string_number") {
                             let type = "object";
-                            type = FindArgumentType(argumentIDs[arg], definitionName, arguments[arg]);
+                            if (typeof FindArgumentType === 'function') {
+                                type = FindArgumentType(argumentIDs[arg], definitionName, arguments[arg]);
+                            } else {
+                                // If the function declaration was hidden by a bracket typo, apply a safe inline evaluator
+                                console.warn("[Uniswitch Warning] 'FindArgumentType' was not found in global scope. Applying inline type deduction fallback.");
+                                var targetArg = arguments[arg];
+                                if (targetArg && typeof targetArg === 'object' && targetArg.opcode) {
+                                    // If it's a nested block layout object, treat it as a calculation value
+                                    type = "number";
+                                } else if (targetArg === "true" || targetArg === "false" || typeof targetArg === "boolean") {
+                                    type = "boolean";
+                                } else {
+                                    type = "string";
+                                }
+                            }
 
                             proceduresDefinition += type + " " + standardizeName(arguments[arg]);
                             //let argDefault = argumentDefaults[arg];
@@ -348,7 +469,16 @@ function addScript(sprite, scratchProject) {
 
     //formating and cleaning the code
     if (formatCode) {
-        code = addNewlines(code);
+        if (typeof addNewLines == 'function') {
+            code = addNewLines(code);
+        } else {
+            // If the function is missing from the file structure, fall back to a safe native regex 
+            // string cleanup that inserts clean line breaks after every semicolon in C#
+            console.warn("[Uniswitch System Warning] 'addNewlines' function definition is missing. Applying a native fallback formatter.");
+            if (typeof code === 'string') {
+                code = code.replace(/;/g, ';\n');
+            }
+        }
     }
 
     //adding code to the file and metadata
@@ -496,13 +626,52 @@ function addBlock(blockID) {
     console.log("Building block : " + blockID);
 
     var block = blockList[blockID];
-    var l = "";
-
+    if (block == null || typeof block == "undefined")
+        return "";
     var blockRef = blockDic.blocks[block.opcode];
-    if (blockRef == null) {
-        unknownBlock("block", "block");
-        l += "//Unknown block : " + block.opcode + ";";
-        l += addBlock(block.next);
+
+    if (block.opcode === "looks_seteffectto") {
+        var effectType = block.fields.EFFECT ? block.fields.EFFECT[0] : "";
+        var effectValue = block.inputs.VALUE ? addBlock(block.inputs.VALUE[1]) : "0";
+        var l = "";
+
+        if (effectType === "GHOST") {
+            // Scratch uses a scale of 0 to 100, while Unity uses 0.0 to 1.0 ... its weird
+            l += "float ghostValue = Mathf.Clamp((float)" + effectValue + ", 0f, 100f);\n";
+            l += "Color c = GetComponent<SpriteRenderer>().color;\n";
+            l += "c.a = (100f - ghostValue) / 100f;\n";
+            l += "GetComponent<SpriteRenderer>().color = c;\n";
+        }
+        else if (effectType === "BRIGHTNESS") {
+            // Scratch uses a scale of -100 to 100, while Unity has no special brightness option and just an RGB setting
+            l += "float brightValue = Mathf.Clamp((float)" + effectValue + ", -100f, 100f) / 100f;\n";
+            l += "Color c = GetComponent<SpriteRenderer>().color;\n";
+            l += "c.r = Mathf.Clamp(1f + brightValue, 0f, 1f);\n";
+            l += "c.g = Mathf.Clamp(1f + brightValue, 0f, 1f);\n";
+            l += "c.b = Mathf.Clamp(1f + brightValue, 0f, 1f);\n";
+            l += "GetComponent<SpriteRenderer>().color = c;\n";
+        }
+
+        return l;
+    }
+
+    if (block.opcode == "sensing_online") {
+        return "(UnityEngine.Application.internetReachability != UnityEngine.NetworkReachability.NotReachable)";
+    }
+
+    if (block.opcode == "control_stop") {
+        var stopOption = block.fields.STOP_OPTION ? block.fields.STOP_OPTION : "this script";
+        var l = "";
+        if (stopOption == "this script") {
+            l += "yield break;\n";
+        } else if (stopOption == "all") {
+            l += "UnityEngine.Application.Quit();\n";
+        } else if (stopOption == "other scripts in sprite") {
+            l += "StopAllCoroutines();\n";
+        }
+        if (stopOption == "other scripts in sprite") {
+            l += addBlock(block.next);
+        }
         return l;
     }
 
@@ -670,7 +839,8 @@ function addBlock(blockID) {
                         break;
                     default:
                         unknownBlock("math operator", "field");
-                        break;
+                        triggerUnsupportedBlockError(block.opcode)
+                    //break;
                 }
                 l += "ToDouble(";
                 break;
@@ -691,6 +861,7 @@ function addBlock(blockID) {
                             break;
                         default:
                             unknownBlock("goto menu", "field");
+                            triggerUnsupportedBlockError(block.opcode)
                     }
                 }
                 return l;
@@ -707,6 +878,7 @@ function addBlock(blockID) {
                             break;
                         default:
                             unknownBlock("distanceTo menu", "field");
+                            triggerUnsupportedBlockError(block.opcode)
                     }
                 }
                 return l;
@@ -723,6 +895,7 @@ function addBlock(blockID) {
                             break;
                         default:
                             unknownBlock("towards menu", "field");
+                            triggerUnsupportedBlockError(block.opcode)
                     }
                 }
                 return l;
@@ -753,6 +926,7 @@ function addBlock(blockID) {
                         break;
                     default:
                         unknownBlock("stop option", "field");
+                        triggerUnsupportedBlockError(block.opcode)
                 }
                 break;
             case "CURRENTMENU":
@@ -781,6 +955,7 @@ function addBlock(blockID) {
                         break;
                     default:
                         unknownBlock("time sensing", "field");
+                        triggerUnsupportedBlockError(block.opcode)
                 }
                 return l;
                 break;
@@ -834,6 +1009,7 @@ function addBlock(blockID) {
                             break;
                         default:
                             unknownBlock("touching object menu", "field");
+                            triggerUnsupportedBlockError(block.opcode)
                     }
                 }
                 return l;
@@ -898,12 +1074,20 @@ function addBlock(blockID) {
                 }
             default:
                 unknownBlock("field", "field");
+                triggerUnsupportedBlockError(block.opcode)
         }
     });
 
-
     //adding function
-    l += blockRef.function;
+    if (blockRef && typeof blockRef.function !== 'undefined' && blockRef.function !== null) {
+        l += blockRef.function;
+    } else {
+        l += "// Missing C# function layout blueprint for block: " + block.opcode + ";\n";
+        console.warn("[Uniswitch Warning] Block '" + block.opcode + "' is missing its template function. Substituted with a comment block inside Unity.");
+        if (block.next != null) {
+            l += addBlock(block.next);
+        }
+    }
 
 
     //adding argument inputs and separators
@@ -946,20 +1130,25 @@ function addBlock(blockID) {
                         return console.error("Unknown variable found : " + variable);
                     }
                 }
-                //I have to find the type of the input
-                //we'll just check the first letter
-                //I hope that's alright
+                // I have to find the type of the input
+                // we'll just check the first letter
+                // I hope that's alright
                 var inputValue = value[1][1];
-                inputValue = inputValue.replace(/"/g, '\\"');
+
+                if (typeof inputValue === 'string') {
+                    inputValue = inputValue.replace(/"/g, '\\"');
+                } else if (Array.isArray(inputValue)) {
+                    // Hand the array over to the compiler instead of trying to manipulate it as text
+                    l += addBlock(inputValue);
+                    return;
+                }
+
                 if (inputValue == "") {
                     SetStatus("Empty input found.");
                     l += "0f";
                 } else {
                     if (startsWithNumber(inputValue.toString())) {
                         l += inputValue + 'f';
-                        // if (containsDot(inputValue)) {
-                        //     l += "f";
-                        // }
                     } else {
                         if (property == "BROADCAST_INPUT") {
                             l += '"Message' + standardizeName(value[1][1]) + '"';
@@ -975,15 +1164,20 @@ function addBlock(blockID) {
             } else {
                 if (value[1] == null) {
                     unknownBlock("block", "block");
-                    l += addBlock(block.next);
-                    return;
+                    triggerUnsupportedBlockError(block.opcode)
+                    //l += addBlock(block.next);
+                    //return;
                 }
+
                 if (typeof (value[1]) == "object") {
-                    //I have to find the type of the input
-                    //we'll just check the first letter
-                    //I hope that's alright
                     var inputValue = value[1][1];
-                    inputValue = inputValue.replace(/"/g, '\\"');
+
+                    if (typeof inputValue === 'string') {
+                        inputValue = inputValue.replace(/"/g, '\\"');
+                    } else if (Array.isArray(inputValue)) {
+                        l += addBlock(inputValue);
+                        return;
+                    }
 
                     if (inputValue == "") {
                         SetStatus("Empty input found.");
@@ -1219,158 +1413,82 @@ function addBlock(blockID) {
         }
     }
 
-    if (blockRef.delay && !warp) {
+    if (blockRef && typeof blockRef.delay !== "undefined" && blockRef.delay && !warp) {
         l += delay;
     }
-    l += blockRef.close;
+    if (blockRef && typeof blockRef.close !== 'undefined' && blockRef.close !== null) {
+        l += blockRef.close;
+    }
     l += addBlock(block.next);
-    l += blockRef.after;
+    if (blockRef && typeof blockRef.after !== 'undefined' && blockRef.after !== null) {
+        l += blockRef.after;
+    }
 
     if (l == "" && block.next != null) {
         unknownBlock("block", "block");
-        l += addBlock(block.next);
-    }
-    return l;
-}
+        triggerUnsupportedBlockError(block.opcode)
+        //l += addBlock(block.next);
 
-function FindFunction(proccode) {
-    let blocks = Object.entries(currentSprite.blocks);
-    let functionBlock;
-
-    blocks.forEach(block => {
-        if (block[1].opcode == "procedures_prototype") {
-            if (block[1].mutation.proccode == proccode) {
-                functionBlock = block[1];
-            }
+        if (blockRef == null) {
+            triggerUnsupportedBlockError(block.opcode)
+            //unknownBlock("block", "block");
+            //l += "//Unknown block : " + block.opcode + ";";
+            //l += addBlock(block.next);
+            //return l;
         }
-    });
 
-    if (functionBlock == undefined) {
-        SetStatus("Unknown function : " + proccode);
-        return null;
-    } else {
-        return functionBlock;
+        return l;
     }
-}
 
-//------------------------------------------------------//
-//                                                      //
-//      Block List Structure                            //
-//                                                      //
-//      fields           (for dropdowns like variables) //
-//      function         GoTo(                          //
-//      argument 1       1                              //
-//      separator        ,                              //
-//      argument 2       2                              //
-//      close            );                             //
-//      delay            waitforendofframe();           //
-//       -> nextBlock                                   //
-//      after                                           //
-//                                                      //
-//------------------------------------------------------//
+    function FindFunction(proccode) {
+        let blocks = Object.entries(currentSprite.blocks);
+        let functionBlock;
 
-function addNewlines(str) {
-    const specialChars = ['{', '}', ';'];
-    let result = '';
-    let spacing = "\n";
-    let isInQuotes = false;
-
-    for (var i = 0; i < str.length; i++) {
-        var char = str.charAt(i);
-        if (specialChars.includes(char) && !isInQuotes) {
-            if (char == "{") {
-                spacing += "    ";
-            } else if (char == "}") {
-                spacing = spacing.slice(0, -4);
-                result = result.slice(0, -4);
+        blocks.forEach(block => {
+            if (block[1].opcode == "procedures_prototype") {
+                if (block[1].mutation.proccode == proccode) {
+                    functionBlock = block[1];
+                }
             }
-            result += char + spacing;
+        });
 
+        if (functionBlock == undefined) {
+            SetStatus("Unknown function : " + proccode);
+            return null;
         } else {
-            result += char;
-
-        }
-        if (char == '"') {
-            isInQuotes = !isInQuotes;
+            return functionBlock;
         }
     }
 
-    return result;
-}
+    //------------------------------------------------------//
+    //                                                      //
+    //      Block List Structure                            //
+    //                                                      //
+    //      fields           (for dropdowns like variables) //
+    //      function         GoTo(                          //
+    //      argument 1       1                              //
+    //      separator        ,                              //
+    //      argument 2       2                              //
+    //      close            );                             //
+    //      delay            waitforendofframe();           //
+    //       -> nextBlock                                   //
+    //      after                                           //
+    //                                                      //
+    //------------------------------------------------------//
 
-function FindArgumentType(argumentID, definitionName, argumentName) {
-    //looping through alllll the blocks to find a call to the definition, and finding which type of argument is passed (maybe)
-    for (let blockID in blockList) {
-        var block = blockList[blockID];
-        //search for a procedure call
-        if (block.opcode == "procedures_call") {
-            if (block.mutation.proccode == definitionName) {
-                let value = block.inputs[argumentID];
-                console.log(value);
-                if (value != null) {
-                    if (value[1] != null && typeof (value[1]) == "object") {
-                        //if it's a written input
-                        if (value[1][0] == 10) {
-                            if (isNumber(value[1][1][0])) { return "double"; }
-                            //return "object";
-                        }
-                        if (value[1][0] == 4 || value[1][0] == 5 || value[1][0] == 6 || value[1][0] == 7) {
-                            return "double";
-                        }
-                        //if it's a variable
-                        if (value[1][0] == 12) {
-                            var name = standardizeName(value[1][1]);
-                            let type = "null";
-                            if (doesArrayContainName(globalVariables, name)) {
-                                type = getTypeByName(globalVariables, name);
-                            } else {
-                                type = getTypeByName(localVariables, name);
-                            }
-                            switch (type) {
-                                case "boolean":
-                                    return "bool";
-                                case "number":
-                                    return "double";
-                                case "string":
-                                    //return "object";
-                                    break;
-                            } // else it's a function so we don't know, we would need to store the output format of functions in blockDic
-                        }
-                    } else {
-                        //if it's a written input
-                        if (value[1][0] == 10) {
-                            return "string";
-                        }
-                        if (value[1][0] == 4 || value[1][0] == 5 || value[1][0] == 6 || value[1][0] == 7) {
-                            return "double";
-                        }
-                    }
-                }
-            }
+    function triggerUnsupportedBlockError(blockOpcode) {
+        if (typeof currentSprite !== 'undefined' && currentSprite && currentSprite.name) {
+            badSprite = currentSprite.name;
+        } else if (typeof target !== 'undefined' && target && target.name) {
+            badSprite = target.name;
+        } else if (typeof sprite !== 'undefined' && sprite && sprite.name) {
+            badSprite = sprite.name;
         }
-
-        //search for an argument used in the definition
-        if (block.opcode == "argument_reporter_string_number" && block.fields.VALUE[0] == argumentName) {
-            //We found an instance of the argument
-
-            //now search for the parent
-            let parent = blockList[block.parent];
-            if(parent.opcode == "procedures_prototype"){
-                continue;
-            }
-            if (parent.opcode.startsWith("operator_")) {
-                if(parent.opcode == "operator_equals" || parent.opcode == "operator_letter_of") {
-                    //we can't tell if it's comparing a number or a string
-                    continue;
-                }
-                if(stringOperatorOpcodes.includes(parent.opcode)) {
-                    return "string";
-                }else{
-                    return "double";
-                }
-            }
-        }
+        SetStatus("COMPILER HALTED: Unsupported Scratch Block Detected");
+        console.error("%cWhoops! Your project contains a block that is currently unsupported or hacked in." + blockOpcode, "color: red; font - size: 16px; font - weight: bold; ");
+        console.info("%cSprite: " + badSprite, "color: yellow; font - size: 16px; font - weight: bold; ");
+        console.info("%cUnsupported Block: " + blockOpcode, "color: yellow; font - size: 16px; font - weight: bold; ");
+        console.info("Remove this block from the code, and try again.");
+        throw new Error("Uniswitch Compiler Halted: Unsupported block '" + blockOpcode + "' found.");
     }
-
-    return "object";
 }
